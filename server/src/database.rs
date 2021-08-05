@@ -8,6 +8,7 @@ use data_types::{database_rules::DatabaseRules, DatabaseName};
 use futures::future::{BoxFuture, Shared};
 use futures::{FutureExt, TryFutureExt};
 use internal_types::freezable::Freezable;
+use iox_object_store::IoxObjectStore;
 use object_store::path::{ObjectStorePath, Path};
 use observability_deps::tracing::{error, info};
 use parking_lot::RwLock;
@@ -92,12 +93,18 @@ impl Database {
     pub fn new(application: Arc<ApplicationState>, config: DatabaseConfig) -> Self {
         info!(db_name=%config.name, store_prefix=%config.store_prefix.display(), "new database");
 
+        let iox_object_store = Arc::new(IoxObjectStore::new(
+            Arc::clone(application.object_store()),
+            config.server_id,
+            &config.name,
+        ));
         let shared = Arc::new(DatabaseShared {
             config,
             application,
             shutdown: Default::default(),
             state: RwLock::new(Freezable::new(DatabaseState::Known(DatabaseStateKnown {}))),
             state_notify: Default::default(),
+            iox_object_store,
         });
 
         let handle = tokio::spawn(background_worker(Arc::clone(&shared)));
@@ -149,6 +156,10 @@ impl Database {
             .read()
             .get_initialized()
             .map(|state| Arc::clone(&state.db))
+    }
+
+    pub fn iox_object_store(&self) -> Arc<IoxObjectStore> {
+        Arc::clone(&self.shared.iox_object_store)
     }
 
     /// Returns Ok(()) when the Database is initialized, or the error
@@ -204,14 +215,10 @@ impl Database {
         Ok(async move {
             let db_name = &shared.config.name;
 
-            PreservedCatalog::wipe(
-                shared.application.object_store().as_ref(),
-                shared.config.server_id,
-                db_name,
-            )
-            .await
-            .map_err(Box::new)
-            .context(WipePreservedCatalog { db_name })?;
+            PreservedCatalog::wipe(&shared.iox_object_store)
+                .await
+                .map_err(Box::new)
+                .context(WipePreservedCatalog { db_name })?;
 
             {
                 let mut state = shared.state.write();
@@ -240,6 +247,9 @@ struct DatabaseShared {
 
     /// Notify that the database state has changed
     state_notify: Notify,
+
+    /// The object store interface for this database
+    iox_object_store: Arc<IoxObjectStore>,
 }
 
 /// The background worker for `Database` - there should only ever be one
@@ -492,7 +502,7 @@ impl DatabaseStateRulesLoaded {
     ) -> Result<DatabaseStateCatalogLoaded, InitError> {
         let (preserved_catalog, catalog, replay_plan) = load_or_create_preserved_catalog(
             shared.config.name.as_str(),
-            Arc::clone(shared.application.object_store()),
+            Arc::clone(&shared.iox_object_store),
             shared.config.server_id,
             Arc::clone(shared.application.metric_registry()),
             shared.config.wipe_catalog_on_error,
@@ -507,7 +517,11 @@ impl DatabaseStateRulesLoaded {
 
         let database_to_commit = DatabaseToCommit {
             server_id: shared.config.server_id,
-            object_store: Arc::clone(shared.application.object_store()),
+            iox_object_store: Arc::new(IoxObjectStore::new(
+                Arc::clone(shared.application.object_store()),
+                shared.config.server_id,
+                &shared.config.name,
+            )),
             exec: Arc::clone(shared.application.executor()),
             rules: Arc::clone(&self.rules),
             preserved_catalog,

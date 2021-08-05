@@ -89,6 +89,7 @@ use generated_types::influxdata::pbdata::v1 as pb;
 use hashbrown::HashMap;
 use influxdb_line_protocol::ParsedLine;
 use internal_types::freezable::Freezable;
+use iox_object_store::IoxObjectStore;
 use lifecycle::LockableChunk;
 use metrics::{KeyValue, MetricObserverBuilder};
 use object_store::{ObjectStore, ObjectStoreApi};
@@ -622,7 +623,7 @@ where
     /// Tells the server the set of rules for a database.
     ///
     /// Waits until the database has initialized or failed to do so
-    pub async fn create_database(&self, rules: DatabaseRules) -> Result<()> {
+    pub async fn create_database(&self, rules: DatabaseRules) -> Result<Arc<Database>> {
         let db_name = rules.name.clone();
         let object_store = self.shared.application.object_store().as_ref();
 
@@ -647,7 +648,11 @@ where
 
         create_preserved_catalog(
             db_name.as_str(),
-            Arc::clone(self.shared.application.object_store()),
+            Arc::new(IoxObjectStore::new(
+                Arc::clone(self.shared.application.object_store()),
+                server_id,
+                &db_name,
+            )),
             server_id,
             Arc::clone(self.shared.application.metric_registry()),
             true,
@@ -687,7 +692,7 @@ where
 
         database.wait_for_init().await.context(DatabaseInit)?;
 
-        Ok(())
+        Ok(database)
     }
 
     pub async fn write_pb(&self, database_batch: pb::DatabaseBatch) -> Result<()> {
@@ -1425,7 +1430,7 @@ mod tests {
     async fn create_simple_database<M>(
         server: &Server<M>,
         name: impl Into<String> + Send,
-    ) -> Result<()>
+    ) -> Result<Arc<Database>>
     where
         M: ConnectionManager + Send + Sync,
     {
@@ -1996,11 +2001,11 @@ mod tests {
         // 3. existing one, but rules file is broken => can be wiped, will not exist afterwards
         // 4. existing one, but catalog is broken => can be wiped, will exist afterwards
         // 5. recently (during server lifecycle) created one => cannot be wiped
-        let db_name_existing = DatabaseName::new("db_existing".to_string()).unwrap();
-        let db_name_non_existing = DatabaseName::new("db_non_existing".to_string()).unwrap();
-        let db_name_rules_broken = DatabaseName::new("db_broken_rules".to_string()).unwrap();
-        let db_name_catalog_broken = DatabaseName::new("db_broken_catalog".to_string()).unwrap();
-        let db_name_created = DatabaseName::new("db_created".to_string()).unwrap();
+        let db_name_existing = DatabaseName::new("db_existing").unwrap();
+        let db_name_non_existing = DatabaseName::new("db_non_existing").unwrap();
+        let db_name_rules_broken = DatabaseName::new("db_broken_rules").unwrap();
+        let db_name_catalog_broken = DatabaseName::new("db_broken_catalog").unwrap();
+        let db_name_created = DatabaseName::new("db_created").unwrap();
 
         // setup
         let application = make_application();
@@ -2012,7 +2017,7 @@ mod tests {
         server.set_id(server_id).unwrap();
         server.wait_for_init().await.unwrap();
 
-        create_simple_database(&server, db_name_existing.clone())
+        let existing = create_simple_database(&server, db_name_existing.clone())
             .await
             .expect("failed to create database");
 
@@ -2020,7 +2025,7 @@ mod tests {
             .await
             .expect("failed to create database");
 
-        create_simple_database(&server, db_name_catalog_broken.clone())
+        let catalog_broken = create_simple_database(&server, db_name_catalog_broken.clone())
             .await
             .expect("failed to create database");
 
@@ -2040,15 +2045,11 @@ mod tests {
             .await
             .unwrap();
 
-        let (preserved_catalog, _catalog) = PreservedCatalog::load::<TestCatalogState>(
-            Arc::clone(&store),
-            server_id,
-            db_name_catalog_broken.to_string(),
-            (),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (preserved_catalog, _catalog) =
+            PreservedCatalog::load::<TestCatalogState>(catalog_broken.iox_object_store(), ())
+                .await
+                .unwrap()
+                .unwrap();
 
         parquet_file::catalog::test_helpers::break_catalog_with_weird_version(&preserved_catalog)
             .await;
@@ -2104,27 +2105,23 @@ mod tests {
                 .to_string(),
             "error wiping preserved catalog: database (db_existing) in invalid state (Initialized) for transition (WipePreservedCatalog)"
         );
-        assert!(PreservedCatalog::exists(
-            application.object_store().as_ref(),
-            server_id,
-            db_name_existing.as_str()
-        )
-        .await
-        .unwrap());
+        assert!(PreservedCatalog::exists(&existing.iox_object_store(),)
+            .await
+            .unwrap());
 
         // 2. cannot wipe non-existent DB
         assert!(matches!(
             server.database(&db_name_non_existing).unwrap_err(),
             Error::DatabaseNotFound { .. }
         ));
-        PreservedCatalog::new_empty::<TestCatalogState>(
+        let non_existing_iox_object_store = Arc::new(IoxObjectStore::new(
             Arc::clone(application.object_store()),
             server_id,
-            db_name_non_existing.to_string(),
-            (),
-        )
-        .await
-        .unwrap();
+            &db_name_non_existing,
+        ));
+        PreservedCatalog::new_empty::<TestCatalogState>(non_existing_iox_object_store, ())
+            .await
+            .unwrap();
         assert_eq!(
             server
                 .wipe_preserved_catalog(&db_name_non_existing)
@@ -2165,13 +2162,9 @@ mod tests {
 
         database.wait_for_init().await.unwrap();
 
-        assert!(PreservedCatalog::exists(
-            application.object_store().as_ref(),
-            server_id,
-            &db_name_catalog_broken.to_string()
-        )
-        .await
-        .unwrap());
+        assert!(PreservedCatalog::exists(&catalog_broken.iox_object_store())
+            .await
+            .unwrap());
         assert!(database.init_error().is_none());
 
         assert!(server.db(&db_name_catalog_broken).is_ok());
@@ -2183,7 +2176,7 @@ mod tests {
             .expect("DB writable");
 
         // 5. cannot wipe if DB was just created
-        server
+        let created = server
             .create_database(DatabaseRules::new(db_name_created.clone()))
             .await
             .unwrap();
@@ -2195,35 +2188,32 @@ mod tests {
                 .to_string(),
             "error wiping preserved catalog: database (db_created) in invalid state (Initialized) for transition (WipePreservedCatalog)"
         );
-        assert!(PreservedCatalog::exists(
-            application.object_store().as_ref(),
-            server_id,
-            &db_name_created.to_string()
-        )
-        .await
-        .unwrap());
+        assert!(PreservedCatalog::exists(&created.iox_object_store())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
     async fn cannot_create_db_when_catalog_is_present() {
         let application = make_application();
         let server_id = ServerId::try_from(1).unwrap();
-        let db_name = "my_db";
+        let db_name = DatabaseName::new("my_db").unwrap();
 
         // setup server
         let server = make_server(Arc::clone(&application));
         server.set_id(server_id).unwrap();
         server.wait_for_init().await.unwrap();
 
-        // create catalog
-        PreservedCatalog::new_empty::<TestCatalogState>(
+        let iox_object_store = Arc::new(IoxObjectStore::new(
             Arc::clone(application.object_store()),
             server_id,
-            db_name.to_string(),
-            (),
-        )
-        .await
-        .unwrap();
+            &db_name,
+        ));
+
+        // create catalog
+        PreservedCatalog::new_empty::<TestCatalogState>(iox_object_store, ())
+            .await
+            .unwrap();
 
         // creating database will now result in an error
         let err = create_simple_database(&server, db_name).await.unwrap_err();

@@ -184,10 +184,10 @@ impl<T: ObjectStoreApi> ObjectStoreApi for ThrottledStore<T> {
         self.inner.delete(location).await
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Self::Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Self::Path>, Self::Error>>, Self::Error> {
+    async fn list(
+        &self,
+        prefix: Option<&Self::Path>,
+    ) -> Result<BoxStream<'static, Result<Vec<Self::Path>, Self::Error>>, Self::Error> {
         sleep(self.config.wait_list_per_call).await;
 
         // need to copy to avoid moving / referencing `self`

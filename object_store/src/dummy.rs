@@ -68,11 +68,11 @@ impl ObjectStoreApi for DummyObjectStore {
         NotSupported { name: &self.name }.fail()
     }
 
-    async fn list<'a>(
-        &'a self,
-        _prefix: Option<&'a Self::Path>,
+    async fn list(
+        &self,
+        _prefix: Option<&Self::Path>,
     ) -> crate::Result<
-        futures::stream::BoxStream<'a, crate::Result<Vec<Self::Path>, Self::Error>>,
+        futures::stream::BoxStream<'static, crate::Result<Vec<Self::Path>, Self::Error>>,
         Self::Error,
     > {
         NotSupported { name: &self.name }.fail()

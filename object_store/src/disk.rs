@@ -147,32 +147,33 @@ impl ObjectStoreApi for File {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Self::Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Self::Path>>>> {
+    async fn list(
+        &self,
+        prefix: Option<&Self::Path>,
+    ) -> Result<BoxStream<'static, Result<Vec<Self::Path>>>> {
         let root_path = self.root.to_raw();
+        let prefix = prefix.cloned();
         let walkdir = WalkDir::new(&root_path)
             // Don't include the root directory itself
             .min_depth(1);
 
-        let s =
-            walkdir.into_iter().filter_map(move |result_dir_entry| {
-                match convert_walkdir_result(result_dir_entry) {
-                    Err(e) => Some(Err(e)),
-                    Ok(None) => None,
-                    Ok(entry @ Some(_)) => entry
-                        .filter(|dir_entry| dir_entry.file_type().is_file())
-                        .map(|file| {
-                            let relative_path = file.path().strip_prefix(&root_path).expect(
-                                "Must start with root path because this came from walking the root",
-                            );
-                            FilePath::raw(relative_path, false)
-                        })
-                        .filter(|name| prefix.map_or(true, |p| name.prefix_matches(p)))
-                        .map(|name| Ok(vec![name])),
-                }
-            });
+        let s = walkdir.into_iter().filter_map(move |result_dir_entry| {
+            let prefix = prefix.clone();
+            match convert_walkdir_result(result_dir_entry) {
+                Err(e) => Some(Err(e)),
+                Ok(None) => None,
+                Ok(entry @ Some(_)) => entry
+                    .filter(|dir_entry| dir_entry.file_type().is_file())
+                    .map(|file| {
+                        let relative_path = file.path().strip_prefix(&root_path).expect(
+                            "Must start with root path because this came from walking the root",
+                        );
+                        FilePath::raw(relative_path, false)
+                    })
+                    .filter(move |name| prefix.map_or(true, |p| name.prefix_matches(&p)))
+                    .map(|name| Ok(vec![name])),
+            }
+        });
 
         Ok(stream::iter(s).boxed())
     }

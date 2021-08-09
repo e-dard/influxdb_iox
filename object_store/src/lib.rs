@@ -92,10 +92,10 @@ pub trait ObjectStoreApi: Send + Sync + 'static {
     async fn delete(&self, location: &Self::Path) -> Result<(), Self::Error>;
 
     /// List all the objects with the given prefix.
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Self::Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Self::Path>, Self::Error>>, Self::Error>;
+    async fn list(
+        &self,
+        prefix: Option<&Self::Path>,
+    ) -> Result<BoxStream<'static, Result<Vec<Self::Path>, Self::Error>>, Self::Error>;
 
     /// List objects with the given prefix and an implementation specific
     /// delimiter. Returns common prefixes (directories) in addition to object
@@ -320,10 +320,10 @@ impl ObjectStoreApi for ObjectStore {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Self::Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Self::Path>>>> {
+    async fn list(
+        &self,
+        prefix: Option<&Self::Path>,
+    ) -> Result<BoxStream<'static, Result<Vec<Self::Path>>>> {
         use ObjectStoreIntegration::*;
         Ok(match (&self.integration, prefix) {
             (AmazonS3(s3), Some(path::Path::AmazonS3(prefix))) => s3

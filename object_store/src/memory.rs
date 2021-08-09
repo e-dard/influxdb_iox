@@ -93,10 +93,10 @@ impl ObjectStoreApi for InMemory {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Self::Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Self::Path>>>> {
+    async fn list(
+        &self,
+        prefix: Option<&Self::Path>,
+    ) -> Result<BoxStream<'static, Result<Vec<Self::Path>>>> {
         let list = if let Some(prefix) = &prefix {
             self.storage
                 .read()

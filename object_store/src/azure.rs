@@ -137,10 +137,10 @@ impl ObjectStoreApi for MicrosoftAzure {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Self::Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Self::Path>>>> {
+    async fn list(
+        &self,
+        prefix: Option<&Self::Path>,
+    ) -> Result<BoxStream<'static, Result<Vec<Self::Path>>>> {
         #[derive(Clone)]
         enum ListState {
             Start,

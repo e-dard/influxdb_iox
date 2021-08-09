@@ -13,10 +13,10 @@
 
 use bytes::Bytes;
 use data_types::{server_id::ServerId, DatabaseName};
-use futures::{stream::BoxStream, Stream};
+use futures::{stream::BoxStream, Stream, StreamExt, TryStreamExt};
 use object_store::{
     path::{parsed::DirsAndFileName, ObjectStorePath, Path},
-    ListResult, ObjectStore, ObjectStoreApi, Result,
+    ObjectStore, ObjectStoreApi, Result,
 };
 use std::{io, sync::Arc};
 
@@ -46,23 +46,9 @@ impl IoxObjectStore {
         }
     }
 
+    /// The name of the database this object store is for.
     pub fn database_name(&self) -> &str {
         &self.database_name
-    }
-
-    /// Path where transactions are stored.
-    ///
-    /// The format is:
-    ///
-    /// ```text
-    /// <server_id>/<db_name>/transactions/
-    /// ```
-    pub fn catalog_path(&self) -> Path {
-        let mut path = self.store.new_path();
-        path.push_dir(self.server_id.to_string());
-        path.push_dir(&self.database_name);
-        path.push_dir("transactions");
-        path
     }
 
     /// Location where parquet data goes to.
@@ -80,39 +66,78 @@ impl IoxObjectStore {
         path
     }
 
-    pub async fn put<S>(&self, _location: &Path, _bytes: S, _length: Option<usize>) -> Result<()>
+    /// Store this data in this database's object store.
+    pub async fn put<S>(
+        &self,
+        location: &RelativePath,
+        bytes: S,
+        length: Option<usize>,
+    ) -> Result<()>
     where
         S: Stream<Item = io::Result<Bytes>> + Send + Sync + 'static,
     {
-        unimplemented!();
+        let path = self.root_path.join(location);
+        self.store.put(&path, bytes, length).await
     }
 
-    pub async fn list<'a>(
-        &'a self,
-        _prefix: Option<&'a Path>,
-    ) -> Result<BoxStream<'a, Result<Vec<Path>>>> {
-        unimplemented!();
+    /// List the relative paths in this database's object store.
+    pub async fn list(
+        &self,
+        _prefix: Option<&RelativePath>,
+    ) -> Result<BoxStream<'static, Result<Vec<RelativePath>>>> {
+        unimplemented!()
+        // let path = prefix.map(|p| self.root_path.join(p));
+        // let store = Arc::clone(&self.store);
+        // let root_path = self.root_path.clone();
+        // Ok(store
+        //     .list(path.as_ref())
+        //     .await
+        //     .map(move |stream| {
+        //         stream.map_ok(move |list| {
+        //             list.into_iter()
+        //                 .map(|list_item| root_path.relative(list_item))
+        //                 .collect()
+        //         })
+        //     })?
+        //     .boxed())
     }
 
-    pub async fn list_with_delimiter(&self, _prefix: &Path) -> Result<ListResult<Path>> {
-        unimplemented!();
+    /// List all the catalog transaction files in object storage for this database.
+    pub async fn catalog_transactions(
+        &self,
+    ) -> Result<BoxStream<'static, Result<Vec<Transaction>>>> {
+        Ok(self.list(Some(&RelativePath {
+            parts: vec!["transactions".into()],
+        }))
+        .await?
+        .map_ok(|paths| paths.into_iter().map(Transaction::new).collect::<Vec<_>>())
+        .boxed())
     }
 
-    pub async fn get(&self, _location: &Path) -> Result<BoxStream<'static, Result<Bytes>>> {
-        unimplemented!();
+    // pub async fn list_with_delimiter(
+    //     &self,
+    //     prefix: &RelativePath,
+    // ) -> Result<ListResult<RelativePath>> {
+    //     let path = self.root_path.join(prefix);
+    //     self.store.list_with_delimiter(&path).await.map(|list| {
+    //
+    //     })
+    // }
+
+    /// Get the data in this relative path in this database's object store.
+    pub async fn get(&self, location: &RelativePath) -> Result<BoxStream<'static, Result<Bytes>>> {
+        let path = self.root_path.join(location);
+        self.store.get(&path).await
     }
 
-    pub async fn delete(&self, _location: &Path) -> Result<()> {
-        unimplemented!();
-    }
-
-    pub fn path_from_dirs_and_filename(&self, _path: DirsAndFileName) -> Path {
-        unimplemented!();
-    }
+    // pub async fn delete(&self, location: &RelativePath) -> Result<()> {
+    //     let path = self.root_path.join(location);
+    //     self.store.delete(&path).await
+    // }
 }
 
 /// A database-specific object store path that all `RelativePath`s should be within.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RootPath {
     root: Path,
 }
@@ -135,6 +160,20 @@ impl RootPath {
 
         path
     }
+
+    fn relative(&self, full_path: Path) -> RelativePath {
+        let parsed_root: DirsAndFileName = self.root.clone().into();
+        let parsed_full: DirsAndFileName = full_path.into();
+
+        RelativePath {
+            parts: parsed_full
+                .parts_after_prefix(&parsed_root)
+                .expect("Full path should have started with the root")
+                .into_iter()
+                .map(|part| part.to_string())
+                .collect(),
+        }
+    }
 }
 
 /// A path within a database's object store directory. Must be combined with a database root path
@@ -142,6 +181,17 @@ impl RootPath {
 #[derive(Debug)]
 pub struct RelativePath {
     parts: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct Transaction {
+    relative_path: RelativePath,
+}
+
+impl Transaction {
+    fn new(relative_path: RelativePath) -> Self {
+        Self { relative_path }
+    }
 }
 
 #[cfg(test)]
@@ -158,17 +208,6 @@ mod tests {
     /// `DirsAndFileName` and thus using object_store::path::DELIMITER as the separator
     fn make_object_store() -> Arc<ObjectStore> {
         Arc::new(ObjectStore::new_in_memory())
-    }
-
-    #[test]
-    fn catalog_path_is_relative_to_db_root() {
-        let server_id = make_server_id();
-        let database_name = DatabaseName::new("clouds").unwrap();
-        let iox_object_store = IoxObjectStore::new(make_object_store(), server_id, &database_name);
-        assert_eq!(
-            iox_object_store.catalog_path().display(),
-            "1/clouds/transactions/"
-        );
     }
 
     #[test]

@@ -14,9 +14,9 @@ use std::{
 use crate::metadata::IoxParquetMetaData;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use generated_types::influxdata::iox::catalog::v1 as proto;
-use iox_object_store::IoxObjectStore;
+use iox_object_store::{IoxObjectStore, RelativePath};
 use object_store::{
     path::{parsed::DirsAndFileName, parts::PathPart, ObjectStorePath, Path},
     ObjectStore, ObjectStoreApi,
@@ -268,7 +268,7 @@ pub struct PreservedCatalog {
 impl PreservedCatalog {
     /// Checks if a preserved catalog exists.
     pub async fn exists(iox_object_store: &IoxObjectStore) -> Result<bool> {
-        Ok(!list_files(iox_object_store).await?.is_empty())
+        Ok(!iox_object_store.catalog_transactions().await.context(Read)?.next().await.is_some())
     }
 
     /// Find last transaction-start-timestamp.
@@ -278,8 +278,9 @@ impl PreservedCatalog {
         iox_object_store: &IoxObjectStore,
     ) -> Result<Option<DateTime<Utc>>> {
         let mut res = None;
-        for (path, _file_type, _revision_counter, _uuid) in list_files(iox_object_store).await? {
-            match load_transaction_proto(iox_object_store, &path).await {
+        for transaction in iox_object_store.catalog_transactions().await? {
+            let path = &transaction.relative_path;
+            match load_transaction_proto(iox_object_store, path).await {
                 Ok(proto) => match parse_timestamp(&proto.start_timestamp) {
                     Ok(ts) => {
                         res = Some(res.map_or(ts, |res: DateTime<Utc>| res.max(ts)));
@@ -579,9 +580,8 @@ fn parse_file_path(path: Path) -> Option<(u64, Uuid, FileType)> {
 ///
 /// The files are in no particular order!
 async fn list_files(iox_object_store: &IoxObjectStore) -> Result<Vec<(Path, FileType, u64, Uuid)>> {
-    let list_path = iox_object_store.catalog_path();
     let paths = iox_object_store
-        .list(Some(&list_path))
+        .list_catalog_files()
         .await
         .context(Read {})?
         .map_ok(|paths| {
@@ -626,7 +626,7 @@ async fn store_transaction_proto(
 /// Load and deserialize protobuf-encoded transaction from store.
 async fn load_transaction_proto(
     iox_object_store: &IoxObjectStore,
-    path: &Path,
+    path: &RelativePath,
 ) -> Result<proto::Transaction> {
     let data = iox_object_store
         .get(path)

@@ -521,9 +521,9 @@ mod tests {
         let lp4 = "cpu new_field=200 4";
 
         let mut chunk = write_lp_to_new_chunk(lp1).unwrap();
-        write_lp_to_chunk(&lp2, &mut chunk).unwrap();
-        write_lp_to_chunk(&lp3, &mut chunk).unwrap();
-        write_lp_to_chunk(&lp4, &mut chunk).unwrap();
+        write_lp_to_chunk(lp2, &mut chunk).unwrap();
+        write_lp_to_chunk(lp3, &mut chunk).unwrap();
+        write_lp_to_chunk(lp4, &mut chunk).unwrap();
 
         let summary = chunk.table_summary();
 
